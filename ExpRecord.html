@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Pocket Expense Tracker</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            padding: 10px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+        #total {
+            font-weight: bold;
+            padding: 10px;
+        }
+        .positive {
+            color: green;
+        }
+        .negative {
+            color: red;
+        }
+        .action-btn {
+            margin: 0 5px;
+            cursor: pointer;
+            color: blue;
+            text-decoration: underline;
+        }
+        input, button {
+            padding: 10px;
+            margin: 5px 0;
+            font-size: 1em;
+        }
+        /* Mobile responsiveness */
+        @media (max-width: 600px) {
+            body {
+                margin: 10px;
+            }
+            table, input, button {
+                font-size: 0.9em;
+                width: 100%;
+            }
+            table, th, td {
+                display: block;
+            }
+            th, td {
+                padding: 5px;
+                text-align: left;
+            }
+        }
+    </style>
+</head>
+<body>
+    <h1>Pocket Expense Tracker</h1>
+    <form id="expenseForm">
+        <label for="date">Date:</label>
+        <input type="date" id="date" required readonly>
+        <label for="description">Description:</label>
+        <input type="text" id="description" required>
+        <label for="amount">Amount (PKR):</label>
+        <input type="number" id="amount" required step="0.01">
+        <label>
+            <input type="checkbox" id="incomeCheckbox"> Income
+        </label>
+        <button type="submit">Add Entry</button>
+    </form>
+
+    <table id="expenseTable">
+        <thead>
+            <tr>
+                <th>Date</th>
+                <th>Description</th>
+                <th>Amount (PKR)</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody></tbody>
+    </table>
+
+    <div id="total">Total: PKR 0.00</div>
+    <button id="undoButton" onclick="undoDelete()" disabled>Undo Delete</button>
+    <button id="redoButton" onclick="redoDelete()" disabled>Redo Delete</button>
+    <button id="exportButton" onclick="exportToExcel()">Export to Excel</button>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script>
+        const expenseForm = document.getElementById('expenseForm');
+        const expenseTable = document.getElementById('expenseTable').getElementsByTagName('tbody')[0];
+        const totalDisplay = document.getElementById('total');
+        const dateInput = document.getElementById('date');
+        const descriptionInput = document.getElementById('description');
+        const amountInput = document.getElementById('amount');
+        const incomeCheckbox = document.getElementById('incomeCheckbox');
+        const undoButton = document.getElementById('undoButton');
+        const redoButton = document.getElementById('redoButton');
+        let totalAmount = 0;
+        let expenseData = [];
+        let deletedEntries = [];
+        let redoStack = [];
+        let editingIndex = null;
+        let originalEntry = null;
+
+        // Load data from localStorage when page loads
+        window.onload = function() {
+            setDateField();
+            if (localStorage.getItem('expenseData')) {
+                expenseData = JSON.parse(localStorage.getItem('expenseData'));
+                expenseData.sort((a, b) => new Date(a.date) - new Date(b.date));
+                expenseData.forEach((entry, index) => addRowToTable(entry, index));
+                updateTotal();
+            }
+        };
+
+        function setDateField() {
+            const today = new Date().toISOString().split('T')[0];
+            dateInput.value = today;
+        }
+
+        expenseForm.addEventListener('submit', function(event) {
+            event.preventDefault();
+            const date = formatDate(dateInput.value);
+            const description = descriptionInput.value;
+            const amount = parseFloat(amountInput.value);
+            const isIncome = incomeCheckbox.checked;
+
+            const finalAmount = isIncome ? amount : -amount;
+
+            if (editingIndex !== null) {
+                expenseData[editingIndex] = { date, description, amount: finalAmount };
+                editingIndex = null;
+                originalEntry = null; // Reset original entry after saving
+            } else {
+                const entry = { date, description, amount: finalAmount };
+                expenseData.push(entry);
+            }
+
+            expenseData.sort((a, b) => new Date(a.date) - new Date(b.date));
+            localStorage.setItem('expenseData', JSON.stringify(expenseData));
+
+            refreshTable();
+            setDateField();
+            descriptionInput.value = '';
+            amountInput.value = '';
+            incomeCheckbox.checked = false;
+            dateInput.readOnly = true;
+        });
+
+        function addRowToTable(entry, index) {
+            const row = expenseTable.insertRow();
+            const dateCell = row.insertCell(0);
+            const descCell = row.insertCell(1);
+            const amountCell = row.insertCell(2);
+            const actionCell = row.insertCell(3);
+
+            dateCell.textContent = entry.date;
+            descCell.textContent = entry.description;
+            amountCell.textContent = `${formatNumber(entry.amount)}`;
+            amountCell.className = entry.amount >= 0 ? 'positive' : 'negative';
+
+            actionCell.innerHTML = 
+                `<span class="action-btn" onclick="editEntry(${index})">Edit</span>
+                <span class="action-btn" onclick="deleteEntry(${index})">Delete</span>`;
+
+            totalAmount += entry.amount;
+        }
+
+        function editEntry(index) {
+            const entry = expenseData[index];
+            originalEntry = { ...entry }; // Store original entry values
+            dateInput.value = entry.date.split('-').reverse().join('-');
+            descriptionInput.value = entry.description;
+            amountInput.value = Math.abs(entry.amount);
+            incomeCheckbox.checked = entry.amount >= 0;
+            dateInput.readOnly = false;
+            editingIndex = index;
+        }
+
+        function deleteEntry(index) {
+            const entry = expenseData.splice(index, 1)[0];
+            deletedEntries.push({ entry, index });
+            redoStack = [];
+            localStorage.setItem('expenseData', JSON.stringify(expenseData));
+            refreshTable();
+            undoButton.disabled = false;
+        }
+
+        function undoDelete() {
+            if (deletedEntries.length > 0) {
+                const lastDeleted = deletedEntries.pop();
+                expenseData.splice(lastDeleted.index, 0, lastDeleted.entry);
+                redoStack.push(lastDeleted);
+                refreshTable();
+                localStorage.setItem('expenseData', JSON.stringify(expenseData));
+                redoButton.disabled = false;
+            }
+            if (deletedEntries.length === 0) {
+                undoButton.disabled = true;
+            }
+        }
+
+        function redoDelete() {
+            if (redoStack.length > 0) {
+                const lastRedo = redoStack.pop();
+                expenseData.splice(lastRedo.index, 1);
+                deletedEntries.push(lastRedo);
+                refreshTable();
+                localStorage.setItem('expenseData', JSON.stringify(expenseData));
+                undoButton.disabled = false;
+            }
+            if (redoStack.length === 0) {
+                redoButton.disabled = true;
+            }
+        }
+
+        function refreshTable() {
+            expenseTable.innerHTML = '';
+            totalAmount = 0;
+            expenseData.forEach((entry, index) => addRowToTable(entry, index));
+            updateTotal();
+        }
+
+        function updateTotal() {
+            totalDisplay.textContent = `Total: PKR ${formatNumber(totalAmount)}`;
+            totalDisplay.className = totalAmount >= 0 ? 'positive' : 'negative';
+        }
+
+        function formatNumber(num) {
+            return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+        }
+
+        function formatDate(date) {
+            const [year, month, day] = date.split('-');
+            return `${day}-${month}-${year}`;
+        }
+
+        // Prevent changing inputs before any change is made
+        descriptionInput.addEventListener('input', () => checkForChanges());
+        amountInput.addEventListener('input', () => checkForChanges());
+        incomeCheckbox.addEventListener('change', () => checkForChanges());
+
+        function checkForChanges() {
+            if (editingIndex !== null) {
+                const entry = expenseData[editingIndex];
+                if (
+                    descriptionInput.value !== entry.description ||
+                    Math.abs(amountInput.value) !== Math.abs(entry.amount) ||
+                    incomeCheckbox.checked !== (entry.amount >= 0)
+                ) {
+                    // Only then allow changing the date field
+                    dateInput.readOnly = false;
+                }
+            }
+        }
+
+        function exportToExcel() {
+            const workbook = XLSX.utils.book_new();
+            const worksheet = XLSX.utils.table_to_sheet(document.getElementById('expenseTable'));
+            XLSX.utils.book_append_sheet(workbook, worksheet, 'Expenses');
+            XLSX.writeFile(workbook, 'PocketExpenseTracker.xlsx');
+        }
+    </script>
+</body>
+</html>
